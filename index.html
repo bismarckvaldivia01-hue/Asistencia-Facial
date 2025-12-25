@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BioClock v30 - Especialista en Nómina</title>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <style>
+        :root { --primary: #2563eb; --success: #10b981; --danger: #ef4444; --warning: #f59e0b; --dark: #1e293b; --radius: 30px; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #e2e8f0; margin: 0; padding: 10px; display: flex; justify-content: center; }
+        .app-card { width: 100%; max-width: 500px; background: #ffffff; border-radius: 40px; padding: 25px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); border: 1px solid #cbd5e1; }
+        .status-bar { text-align: center; padding: 15px; border-radius: 20px; background: #f1f5f9; font-weight: 800; margin-bottom: 20px; border: 2px solid #e2e8f0; color: var(--dark); }
+        .video-box { width: 220px; height: 220px; border-radius: 50%; overflow: hidden; margin: 0 auto 20px; border: 6px solid white; outline: 5px solid var(--primary); background: #000; position: relative; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .mirror { transform: scaleX(-1); }
+        .grid-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        button { border: none; border-radius: 20px; color: white; font-weight: 700; cursor: pointer; padding: 18px; font-size: 0.85rem; transition: 0.2s; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        button:active { transform: scale(0.95); }
+        .btn-in { background: var(--success); }
+        .btn-out { background: var(--danger); }
+        .btn-reg { background: var(--dark); grid-column: span 2; }
+        .btn-cam { background: #64748b; grid-column: span 2; }
+        .btn-xl { background: var(--primary); grid-column: span 2; margin-top: 10px; border: 2px solid #1d4ed8; }
+        .list-box { margin-top: 20px; background: #f8fafc; border-radius: 20px; max-height: 100px; overflow-y: auto; border: 1px solid #eee; }
+        .row { display: flex; justify-content: space-between; padding: 10px 15px; border-bottom: 1px solid #eee; font-size: 0.8rem; font-weight: 600; }
+    </style>
+</head>
+<body>
+
+<div class="app-card">
+    <div id="status" class="status-bar">CARGANDO BIOMETRÍA...</div>
+    <div class="video-box" id="vBox"><video id="webcam" autoplay muted playsinline class="mirror"></video></div>
+    
+    <div class="grid-btns">
+        <button class="btn-cam" onclick="toggleCam()">🔄 CAMBIAR A CÁMARA TRASERA/FRONTAL</button>
+        <button class="btn-in" onclick="procesar('ENTRADA')">📥 ENTRADA</button>
+        <button class="btn-out" onclick="procesar('SALIDA')">📤 SALIDA</button>
+        <button class="btn-reg" onclick="registrar()">👤 VINCULAR ROSTRO ID</button>
+        <button class="btn-xl" onclick="exportarNomina()">📊 DESCARGAR REPORTE DE PAGO</button>
+    </div>
+    
+    <div class="list-box" id="listaUI"></div>
+</div>
+
+<script>
+    const video = document.getElementById('webcam');
+    const status = document.getElementById('status');
+    const vBox = document.getElementById('vBox');
+    let currentStream = null;
+    let useFrontCam = true;
+    let db = JSON.parse(localStorage.getItem('db_faceid_v30')) || [];
+    let logs = JSON.parse(localStorage.getItem('logs_faceid_v30')) || [];
+
+    function hablar(t) {
+        window.speechSynthesis.cancel();
+        const m = new SpeechSynthesisUtterance(t);
+        m.lang = 'es-ES';
+        window.speechSynthesis.speak(m);
+    }
+
+    function formatName(n) {
+        return n.toLowerCase().trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    }
+
+    async function initCam() {
+        if (currentStream) currentStream.getTracks().forEach(track => track.stop());
+        const constraints = { video: { facingMode: useFrontCam ? "user" : "environment" } };
+        try {
+            currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = currentStream;
+            video.classList.toggle('mirror', useFrontCam);
+            status.innerText = "SISTEMA ACTIVO";
+        } catch (e) { status.innerText = "ERROR DE CÁMARA"; }
+    }
+
+    function toggleCam() {
+        useFrontCam = !useFrontCam;
+        initCam();
+        hablar("Cambiando dispositivo de captura");
+    }
+
+    async function initModels() {
+        const URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
+        await Promise.all([
+            faceapi.nets.ssdMobilenetv1.loadFromUri(URL),
+            faceapi.nets.faceLandmark68Net.loadFromUri(URL),
+            faceapi.nets.faceRecognitionNet.loadFromUri(URL)
+        ]);
+        initCam();
+        actualizarUI();
+    }
+
+    async function procesar(tipo) {
+        status.innerText = "VERIFICANDO...";
+        const d = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+        if (!d) return hablar("Rostro no detectado. Intente de nuevo.");
+
+        const labeled = db.map(e => new faceapi.LabeledFaceDescriptors(e.n, [new Float32Array(Object.values(e.d))]));
+        if(labeled.length === 0) return alert("No hay personal registrado.");
+
+        const match = new faceapi.FaceMatcher(labeled, 0.42).findBestMatch(d.descriptor);
+
+        if (match.label !== 'unknown') {
+            const hoy = new Date();
+            const hoyStr = hoy.toLocaleDateString('es-ES');
+            const horaStr = hoy.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            
+            const logsHoy = logs.filter(l => l.n === match.label && l.f === hoyStr);
+            if (logsHoy.some(r => r.t === tipo)) {
+                hablar(`${match.label}, ya registraste tu ${tipo}.`);
+            } else {
+                logs.unshift({ n: match.label, f: hoyStr, h: horaStr, t: tipo, dayIdx: hoy.getDay(), raw: hoy.getTime() });
+                localStorage.setItem('logs_faceid_v30', JSON.stringify(logs.slice(0, 30000)));
+                
+                if(tipo === 'ENTRADA') hablar(`Bienvenido ${match.label}, excelente jornada.`);
+                else hablar(`Adiós ${match.label}, que tengas un buen descanso.`);
+                
+                vBox.style.outlineColor = tipo === 'ENTRADA' ? 'var(--success)' : 'var(--danger)';
+                setTimeout(() => vBox.style.outlineColor = 'var(--primary)', 3000);
+            }
+        } else { hablar("Identidad desconocida. Contacte al supervisor."); }
+    }
+
+    async function registrar() {
+        const d = await faceapi.detectSingleFace(video).withFaceLandmarks().withFaceDescriptor();
+        if(!d) return alert("Rostro no detectado para registro.");
+        let n = prompt("Nombre y Apellidos del trabajador:");
+        if(n) {
+            db.push({ n: formatName(n), d: Array.from(d.descriptor) });
+            localStorage.setItem('db_faceid_v30', JSON.stringify(db));
+            actualizarUI();
+            hablar("Registro exitoso.");
+        }
+    }
+
+    function exportarNomina() {
+        if(db.length === 0) return alert("No hay registros.");
+        let csv = "\uFEFFNombre,Lun,Mar,Mie,Jue,Vie,Sab,Dom,SÉPTIMO DÍA,TOTAL HORAS,DÍAS GANADOS,ESTADO SEMANAL\n";
+        
+        db.forEach(persona => {
+            const marcas = logs.filter(l => l.n === persona.n);
+            let h = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 0:0 }; 
+            let diasLab = 0;
+            
+            const fechas = [...new Set(marcas.map(m => m.f))];
+            fechas.forEach(f => {
+                const marcasDia = marcas.filter(m => m.f === f);
+                if(marcasDia.some(m => m.t === 'ENTRADA') && marcasDia.some(m => m.t === 'SALIDA')) {
+                    const idx = marcasDia[0].dayIdx;
+                    h[idx] = 8;
+                    if(idx >= 1 && idx <= 6) diasLab++;
+                }
+            });
+
+            const bono = (diasLab === 6) ? 8 : 0;
+            const suma = h[1]+h[2]+h[3]+h[4]+h[5]+h[6]+h[0]+bono;
+            const totalDias = (suma / 8).toFixed(2);
+            const estado = (diasLab === 6) ? "COMPLETO" : "[INCOMPLETO]";
+
+            csv += `${persona.n},${h[1]},${h[2]},${h[3]},${h[4]},${h[5]},${h[6]},${h[0]},${bono},${suma},${totalDias},${estado}\n`;
+        });
+
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.download = "Nomina_BioClock_Especialista.csv"; a.click();
+    }
+
+    function actualizarUI() {
+        document.getElementById('listaUI').innerHTML = db.map(u => `<div class="row"><span>${u.n}</span><button onclick="del('${u.n}')" style="background:none;border:none;color:red;cursor:pointer">🗑️</button></div>`).join('');
+    }
+    function del(n) { if(confirm("¿Eliminar rostro ID?")) { db = db.filter(x => x.n !== n); localStorage.setItem('db_faceid_v30', JSON.stringify(db)); actualizarUI(); } }
+
+    initModels();
+</script>
+</body>
+</html>
